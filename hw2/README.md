@@ -35,7 +35,7 @@ After training is complete, the learned word embeddings are evaluated on complet
 ## Performance
 Here are the in-distribution performance charts. In both training and validation, loss falls steadily while intersection over union performance increases over the epochs. There is some evidence of overfitting, with validation loss occasionally higher than training loss. 
 
-TODO: Insert chart here. 
+![image](https://user-images.githubusercontent.com/78378219/195758335-e46b9256-d273-4c64-92b5-696bafa13a59.png)
 
 On the downstream analogies task, performance is stronger on syntactic analogies than on semantic analogies. This could be a result of a small context window providing little information about the sentence except for parts of speech. Encouragingly, the model achieves 25% top-1 accuracy on 12 semantic analogies about gender, such as "man is to woman as king is to queen." 
 
