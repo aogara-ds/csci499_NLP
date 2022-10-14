@@ -1,0 +1,9 @@
+matplotlib
+torch
+sklearn
+numpy
+tqdm
+scikit_learn
+gensim
+spacy
+torchmetrics

@@ -6,6 +6,7 @@ import tqdm
 import numpy as np
 from collections import Counter
 from spacy.lang.en import English
+import torch
 
 
 def process_book_dir(d, max_per_book=None):
@@ -33,6 +34,7 @@ def process_book_dir(d, max_per_book=None):
     processed_text_lines = [
         [line, label] for (line, label) in processed_text_lines if len(line.split()) > 0
     ]
+    # processed_text_lines = processed_text_lines[:int((len(processed_text_lines) / 1000))]
     print(
         "read in %d lines from %d files in directory %s"
         % (len(processed_text_lines), n_files, d)
@@ -83,22 +85,6 @@ def build_tokenizer_table(train, vocab_size):
         index_to_vocab,
         int(np.max(padded_lens)),  # we don't need a cutoff for vanilla LM
     )
-
-
-def build_output_tables(train):
-    actions = set()
-    targets = set()
-    for episode in train:
-        for _, outseq in episode:
-            a, t = outseq
-            actions.add(a)
-            targets.add(t)
-    actions_to_index = {a: i for i, a in enumerate(actions)}
-    targets_to_index = {t: i for i, t in enumerate(targets)}
-    index_to_actions = {actions_to_index[a]: a for a in actions_to_index}
-    index_to_targets = {targets_to_index[t]: t for t in targets_to_index}
-    return actions_to_index, index_to_actions, targets_to_index, index_to_targets
-
 
 def read_analogies(analogies_fn):
     with open(analogies_fn, "r") as f:
@@ -159,3 +145,43 @@ def encode_data(data, v2i, seq_len):
     print("INFO: encoded %d sentences without regard to order" % idx)
 
     return x, lens
+
+def get_tokens_and_labels(encoded_sentences, lens, args):
+    """
+    Given ndarrays of encoded sentences and sentence lenghts,
+    returns two ndarrays:
+    - tokens: ndarray of token indices
+    - labels: ndarray of multihot tensor labels of context tokens
+    
+    labels is of size (# of tokens, size of vocab) and provides 
+    multihot encoding where all tokens in the context are labelled 1. 
+    """
+    # Initialize tokens and labels as empty lists
+    tokens, labels = [], []
+
+    tokens = torch.zeros((int(sum(lens))))
+    labels = torch.zeros((int(sum(lens)), args.vocab_size))
+
+    # For each token in each sentence
+    row = 0
+    for sentence, slen in zip(encoded_sentences, lens):
+        for token_idx in range(slen[0]):
+            # Append the token to tokens
+            tokens[row] = sentence[token_idx]
+
+            # Append the token's context to labels as a multihot tensor
+            for label_idx in range(token_idx - args.context_size, 
+                                   token_idx + args.context_size + 1):
+                # Don't include the token itself in the context
+                if label_idx == token_idx:
+                    continue
+                # Handle padding
+                elif label_idx < 0 or label_idx >= slen:
+                    labels[row, 0] = 1
+                # Flip each context token's label to 1
+                else:
+                    labels[row, sentence[label_idx]] = 1
+            # Increment row of tokens and labels
+            row += 1
+    
+    return tokens, labels
