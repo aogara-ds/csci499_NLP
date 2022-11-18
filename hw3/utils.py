@@ -193,12 +193,14 @@ def build_output_tables(train):
             a, t = outseq
             actions.add(a)
             targets.add(t)
-    actions_to_index = {a: i + 2 for i, a in enumerate(actions)}
-    targets_to_index = {t: i + 2 for i, t in enumerate(targets)}
+    actions_to_index = {a: i + 3 for i, a in enumerate(actions)}
+    targets_to_index = {t: i + 3 for i, t in enumerate(targets)}
     actions_to_index['<pad>'] = 0
     targets_to_index['<pad>'] = 0
     actions_to_index["<end>"] = 1
     targets_to_index["<end>"] = 1
+    actions_to_index["<bos>"] = 2
+    targets_to_index["<bos>"] = 2
     index_to_actions = {actions_to_index[a]: a for a in actions_to_index}
     index_to_targets = {targets_to_index[t]: t for t in targets_to_index}
     return actions_to_index, index_to_actions, targets_to_index, index_to_targets

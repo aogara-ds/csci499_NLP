@@ -8,7 +8,7 @@ class EncoderLSTM(nn.Module):
 
         # Initialize some hyperparameters
         self.embedding_dim = 7
-        self.lstm_dim = 11
+        self.lstm_dim = 16
         self.lstm_layers = 1
         self.dropout = 0
         self.bidirectional = False
@@ -54,15 +54,15 @@ class DecoderLSTM(nn.Module):
         # Initialize embedding layers
         self.embed_bos = nn.Embedding(
             num_embeddings = 1,
-            embedding_dim = self.input_dim
+            embedding_dim = self.input_dim,
         )
-        self.embed_action = nn.Embedding(
-            num_embeddings = self.num_actions,
-            embedding_dim = int(self.input_dim / 2)
+        self.embed_action = nn.Linear(
+            in_features = self.num_actions,
+            out_features = int(self.input_dim / 2),
         )
-        self.embed_target = nn.Embedding(
-            num_embeddings = self.num_targets,
-            embedding_dim = int(self.input_dim / 2)
+        self.embed_target = nn.Linear(
+            in_features = self.num_targets,
+            out_features = int(self.input_dim / 2),
         )
 
         # Initialize LSTM
@@ -80,44 +80,24 @@ class DecoderLSTM(nn.Module):
                                          out_features=self.num_targets)
 
 
-    def forward(self, h_0, c_0, action, target, bos):
-        if bos == True:
-            # Begin decoding with a learnable BOS token
-            x_0 = self.embed_bos(0)
-        else: 
-            # Embed the action and target inputs
-            a_0 = self.embed_action(action)
-            o_0 = self.embed_target(target)
-            # TODO: Check that this concat is correct
-            x_0 = torch.cat(a_0, o_0)
-        
-        # Run the LSTM to generate a single embedding
-        x_1, (h_1, c_1) = self.lstm(x_0, h_0, c_0)
+    def forward(self, h_0, c_0, action, target):
+        # Embed the action and target inputs
+        a_0 = self.embed_action(action.to(torch.float))
+        o_0 = self.embed_target(target.to(torch.float))
+        x_0 = torch.cat((a_0, o_0), dim=-1)
 
+        # Initialize hidden state if necessary
+        if c_0 == None:
+            c_0 = torch.zeros((h_0.shape[1], self.input_dim)).unsqueeze(0)
+
+        # unsqueeze the input tokens
+        x_0 = x_0.unsqueeze(1)
+
+        # Run the LSTM to generate a single embedding
+        x_1, (h_1, c_1) = self.lstm(x_0, (h_0, c_0))
+        
         # Predict action and target
         action_dist = self.fc_action(x_1)
         target_dist = self.fc_target(x_1)
 
         return action_dist, target_dist, h_1, c_1
-
-
-# class EncoderDecoder(nn.Module):
-#     """
-#     Wrapper class over the Encoder and Decoder.
-#     TODO: edit the forward pass arguments to suit your needs
-#     """
-
-#     def __init__(self, model_type, maps):
-#         if model_type == "lstm":
-#             self.encoder = EncoderLSTM(
-#                 vocab_size=1000,
-#                 pad_idx=maps[0]['<pad>']
-#             )
-#             self.decoder = DecoderLSTM(
-#                 num_actions=len(maps[2]),
-#                 num_targets=len(maps[4])
-#             )
-        
-#     def forward(self, x):
-
-#         pass

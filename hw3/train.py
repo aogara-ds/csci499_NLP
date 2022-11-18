@@ -1,15 +1,47 @@
 import tqdm
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import argparse
 from sklearn.metrics import accuracy_score
+from model import DecoderLSTM, EncoderLSTM
 
 from utils import (
     get_device,
     preprocess_string,
     build_tokenizer_table,
     build_output_tables,
-    prefix_match
+    prefix_match,
+    tokenize_words
 )
+
+class alfred_dataset(torch.utils.data.Dataset):
+    def __init__(self, data_dict):
+        """
+        Initialize the Dataset, which has the same structure as
+        the data_dict provided by preprocess_data(), but implements
+        the necessary __len__() and __getitem__() methods. 
+        """
+        super().__init__()
+        self.instructions = data_dict['instructions']
+        self.actions = data_dict['actions']
+        self.targets = data_dict['targets']
+    
+    def __len__(self):
+        """
+        Verify that all attributes are of the same length,
+        then return that length. 
+        """
+        assert len(self.instructions) == len(self.actions)
+        assert len(self.actions) == len(self.targets)
+        return len(self.instructions)
+
+    def __getitem__(self, idx):
+        """
+        Returns a 3-tuple of the instructions, actions,
+        and targets at the idx. 
+        """
+        return self.instructions[idx], self.actions[idx], self.targets[idx]
 
 
 def setup_dataloader(args):
@@ -27,12 +59,20 @@ def setup_dataloader(args):
 
     # Hint: use the helper functions provided in utils.py
     # ===================================================== #
-    train_loader = None
-    val_loader = None
-    return train_loader, val_loader
 
+    train_dict, val_dict, maps = tokenize_words(args)
 
-def setup_model(args):
+    # Store the tokenized data in a custom defined Dataset object
+    train_dataset = alfred_dataset(train_dict)
+    val_dataset = alfred_dataset(val_dict)
+
+    # Wrap the Dataset objects in iterable DataLoaders
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size)
+
+    return train_loader, val_loader, maps
+
+def setup_model(args, maps, device):
     """
     return:
         - model: YourOwnModelClass
@@ -54,11 +94,21 @@ def setup_model(args):
     # of feeding the model prediction into the recurrent model,
     # you will give the embedding of the target token.
     # ===================================================== #
-    model = None
-    return model
+
+    if args.model_type == "lstm":
+        encoder = EncoderLSTM(
+            vocab_size=1000,
+            pad_idx=maps[0]['<pad>']
+        )
+        decoder = DecoderLSTM(
+            num_actions=len(maps[2]),
+            num_targets=len(maps[4])
+        )
+
+    return encoder, decoder
 
 
-def setup_optimizer(args, model):
+def setup_optimizer(args, encoder, decoder):
     """
     return:
         - criterion: loss_fn
@@ -68,18 +118,20 @@ def setup_optimizer(args, model):
     # Task: Initialize the loss function for action predictions
     # and target predictions. Also initialize your optimizer.
     # ===================================================== #
-    criterion = None
-    optimizer = None
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-2)
 
     return criterion, optimizer
 
 
 def train_epoch(
     args,
-    model,
+    encoder,
+    decoder,
     loader,
     optimizer,
     criterion,
+    maps,
     device,
     training=True,
 ):
@@ -100,59 +152,83 @@ def train_epoch(
     """
 
     epoch_loss = 0.0
-    epoch_acc = 0.0
+    epoch_acc_numerator = 0
+    epoch_acc_denominator = 0
 
     # iterate over each batch in the dataloader
-    # NOTE: you may have additional outputs from the loader __getitem__, you can modify this
-    for (inputs, labels) in loader:
+    for inputs, actions, targets in loader:
         # put model inputs to device
-        inputs, labels = inputs.to(device), labels.to(device)
+        inputs, actions, targets = inputs.to(device), actions.to(device), targets.to(device) 
 
-        # calculate the loss and train accuracy and perform backprop
-        # NOTE: feel free to change the parameters to the model forward pass here + outputs
-        output = model(inputs, labels)
+        # encode the instructions
+        h_seq, h_final = encoder(inputs)
+        h_final = h_final.squeeze()
 
-        loss = criterion(output.squeeze(), labels[:, 0].long())
+        # initialize actions and targets with BOS token
+        bos_tokens = torch.Tensor([2]).expand(h_final.shape[0]).to(int)
+        bos_actions = F.one_hot(bos_tokens, len(maps[2]))
+        bos_targets = F.one_hot(bos_tokens, len(maps[4]))
+
+        # decode the first action-target pair
+        action_dist, target_dist, h_0, c_0 = decoder(
+            h_0 = h_final.unsqueeze(0),
+            c_0 = None,
+            action = bos_actions,
+            target = bos_targets
+        )
+        action_dists, target_dists = action_dist, target_dist
+
+        # decode the rest autoregressively
+        for i in range(actions.shape[1] - 1):
+            # teacher forcing
+            if training == True:
+                action = actions[:,i,:].to(torch.float)
+                target = targets[:,i,:].to(torch.float)
+            else:
+                # NOTE: If you get rid of one hot, student forcing probably works better
+                action = F.one_hot(torch.argmax(action_dist, dim=-1), len(maps[2])).to(torch.float).squeeze()
+                target = F.one_hot(torch.argmax(target_dist, dim=-1), len(maps[4])).to(torch.float).squeeze()
+
+            # get the next prediction
+            action_dist, target_dist, h_0, c_0 = decoder(h_0, c_0, action, target)
+            action_dists = torch.cat((action_dists, action_dist), dim=1)
+            target_dists = torch.cat((target_dists, target_dist), dim=1)
+
+        # calculate the action and target prediction loss
+        action_loss = criterion(action_dists.to(torch.float), actions.to(torch.float))
+        target_loss = criterion(target_dists.to(torch.float), targets.to(torch.float))
+        loss = action_loss + target_loss
 
         # step optimizer and compute gradients during training
         if training:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
-        """
-        # TODO: implement code to compute some other metrics between your predicted sequence
-        # of (action, target) labels vs the ground truth sequence. We already provide 
-        # exact match and prefix exact match. You can also try to compute longest common subsequence.
-        # Feel free to change the input to these functions.
-        """
-        # TODO: add code to log these metrics
-        em = output == labels
-        prefix_em = prefix_em(output, labels)
-        acc = 0.0
-
+        
         # logging
+        
         epoch_loss += loss.item()
-        epoch_acc += acc.item()
 
     epoch_loss /= len(loader)
-    epoch_acc /= len(loader)
 
     return epoch_loss, epoch_acc
 
 
-def validate(args, model, loader, optimizer, criterion, device):
+def validate(args, encoder, decoder, loader, optimizer, criterion, maps, device):
     # set model to eval mode
-    model.eval()
+    encoder.eval()
+    decoder.eval()
 
     # don't compute gradients
     with torch.no_grad():
         val_loss, val_acc = train_epoch(
             args,
-            model,
+            encoder,
+            decoder,
             loader,
             optimizer,
             criterion,
+            maps,
             device,
             training=False,
         )
@@ -160,11 +236,12 @@ def validate(args, model, loader, optimizer, criterion, device):
     return val_loss, val_acc
 
 
-def train(args, model, loaders, optimizer, criterion, device):
+def train(args, encoder, decoder, loaders, optimizer, criterion, maps, device):
     # Train model for a fixed number of epochs
     # In each epoch we compute loss on each sample in our dataset and update the model
     # weights via backpropagation
-    model.train()
+    encoder.train()
+    decoder.train()
 
     for epoch in tqdm.tqdm(range(args.num_epochs)):
 
@@ -172,10 +249,12 @@ def train(args, model, loaders, optimizer, criterion, device):
         # returns loss for action and target prediction and accuracy
         train_loss, train_acc = train_epoch(
             args,
-            model,
+            encoder,
+            decoder,
             loaders["train"],
             optimizer,
             criterion,
+            maps,
             device,
         )
 
@@ -188,10 +267,12 @@ def train(args, model, loaders, optimizer, criterion, device):
         if epoch % args.val_every == 0:
             val_loss, val_acc = validate(
                 args,
-                model,
+                encoder,
+                decoder,
                 loaders["val"],
                 optimizer,
                 criterion,
+                maps,
                 device,
             )
 
@@ -204,6 +285,8 @@ def train(args, model, loaders, optimizer, criterion, device):
     # ===================================================== #
 
 
+
+
 def main(args):
     device = get_device(args.force_cpu)
 
@@ -212,23 +295,26 @@ def main(args):
     loaders = {"train": train_loader, "val": val_loader}
 
     # build model
-    model = setup_model(args, maps, device)
-    print(model)
+    encoder, decoder = setup_model(args, maps, device)
+    print(encoder)
+    print(decoder)
 
     # get optimizer and loss functions
-    criterion, optimizer = setup_optimizer(args, model)
+    criterion, optimizer = setup_optimizer(args, encoder, decoder)
 
     if args.eval:
         val_loss, val_acc = validate(
             args,
-            model,
+            encoder,
+            decoder,
             loaders["val"],
             optimizer,
             criterion,
+            maps,
             device,
         )
     else:
-        train(args, model, loaders, optimizer, criterion, device)
+        train(args, encoder, decoder, loaders, optimizer, criterion, maps, device)
 
 
 if __name__ == "__main__":
@@ -242,10 +328,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--force_cpu", action="store_true", help="debug mode")
     parser.add_argument("--eval", action="store_true", help="run eval")
-    parser.add_argument("--num_epochs", default=1000, help="number of training epochs")
+    parser.add_argument("--num_epochs", type=int, default=1000, help="number of training epochs")
     parser.add_argument(
-        "--val_every", default=5, help="number of epochs between every eval loop"
+        "--val_every", default=5, type=int, help="number of epochs between every eval loop"
     )
+    parser.add_argument("--model_type", type=str, help="encoder decoder model to run")
+
 
     # ================== TODO: CODE HERE ================== #
     # Task (optional): Add any additional command line
