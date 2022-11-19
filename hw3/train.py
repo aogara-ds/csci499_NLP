@@ -4,7 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import argparse
 from sklearn.metrics import accuracy_score
-from model import DecoderLSTM, EncoderLSTM
+from model import *
+import matplotlib.pyplot as plt
 
 from utils import (
     get_device,
@@ -95,6 +96,8 @@ def setup_model(args, maps, device):
     # you will give the embedding of the target token.
     # ===================================================== #
 
+    print(args.model_type)
+    print(args.model_type == "attention")
     if args.model_type == "lstm":
         encoder = EncoderLSTM(
             vocab_size=1000,
@@ -102,7 +105,26 @@ def setup_model(args, maps, device):
         )
         decoder = DecoderLSTM(
             num_actions=len(maps[2]),
-            num_targets=len(maps[4])
+            num_targets=len(maps[4]),
+            maps=maps
+        )
+    if args.model_type == "attention":
+        encoder = EncoderLSTM(
+            vocab_size=1000,
+            pad_idx=maps[0]['<pad>']
+        )
+        decoder = DecoderAttention(
+            num_actions=len(maps[2]),
+            num_targets=len(maps[4]),
+            maps=maps
+        )
+    if args.model_type == "transformer":
+        encoder = EncoderTransformer(
+            vocab_size=1000,
+            pad_idx=maps[0]['<pad>']
+        )
+        decoder = DecoderTransformer(
+            maps=maps
         )
 
     return encoder, decoder
@@ -118,7 +140,7 @@ def setup_optimizer(args, encoder, decoder):
     # Task: Initialize the loss function for action predictions
     # and target predictions. Also initialize your optimizer.
     # ===================================================== #
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=int(0)) # pad token hard coded
     optimizer = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-2)
 
     return criterion, optimizer
@@ -135,68 +157,59 @@ def train_epoch(
     device,
     training=True,
 ):
-    """
-    # TODO: implement function for greedy decoding.
-    # This function should input the instruction sentence
-    # and autoregressively predict the target label by selecting
-    # the token with the highest probability at each step.
-    # Note this is slightly different from the forward pass of
-    # your decoder because you want to pick the token
-    # with the highest probability instead of using the
-    # teacher-forced token.
-
-    # e.g. Input: "Walk straight, turn left to the counter. Put the knife on the table."
-    # Output: [(GoToLocation, diningtable), (PutObject, diningtable)]
-    # Also write some code to compute the accuracy of your
-    # predictions against the ground truth.
-    """
 
     epoch_loss = 0.0
-    epoch_acc_numerator = 0
-    epoch_acc_denominator = 0
+    epoch_acc_num = 0
+    epoch_acc_denom = 0
 
     # iterate over each batch in the dataloader
     for inputs, actions, targets in loader:
         # put model inputs to device
         inputs, actions, targets = inputs.to(device), actions.to(device), targets.to(device) 
 
-        # encode the instructions
-        h_seq, h_final = encoder(inputs)
-        h_final = h_final.squeeze()
+        # make predictions
+        if args.model_type == "lstm":
+            action_dists, target_dists = lstm_inference(
+                encoder, decoder, inputs, actions, targets, training, maps, args
+            )
+        if args.model_type == "attention":
+            action_dists, target_dists = attention_inference(
+                encoder, decoder, inputs, actions, targets, training, maps, args
+            )
+        elif args.model_type == "transformer":
+            action_dists, target_dists = transformer_inference(
+                encoder, decoder, inputs, actions, targets, training, maps, args
+            )
 
-        # initialize actions and targets with BOS token
-        bos_tokens = torch.Tensor([2]).expand(h_final.shape[0]).to(int)
-        bos_actions = F.one_hot(bos_tokens, len(maps[2]))
-        bos_targets = F.one_hot(bos_tokens, len(maps[4]))
+        print('show an example prediction')
+        print(torch.argmax(action_dists[0], dim=-1))
+        print(actions[0])
+        print(torch.argmax(target_dists[0], dim=-1))
+        print(targets[0])
 
-        # decode the first action-target pair
-        action_dist, target_dist, h_0, c_0 = decoder(
-            h_0 = h_final.unsqueeze(0),
-            c_0 = None,
-            action = bos_actions,
-            target = bos_targets
-        )
-        action_dists, target_dists = action_dist, target_dist
+        # track accuracy
+        epoch_acc_denom += torch.sum(actions != maps[2]['<pad>'])
+        epoch_acc_denom += torch.sum(targets != maps[4]['<pad>'])
+        epoch_acc_num += torch.sum(
+            torch.logical_and(
+                torch.argmax(action_dists, dim=-1) == actions,
+                actions != maps[2]['<pad>']
+        ))
+        epoch_acc_num += torch.sum(
+            torch.logical_and(
+                torch.argmax(target_dists, dim=-1) == targets,
+                targets != maps[4]['<pad>']
+        ))
 
-        # decode the rest autoregressively
-        for i in range(actions.shape[1] - 1):
-            # teacher forcing
-            if training == True:
-                action = actions[:,i,:].to(torch.float)
-                target = targets[:,i,:].to(torch.float)
-            else:
-                # NOTE: If you get rid of one hot, student forcing probably works better
-                action = F.one_hot(torch.argmax(action_dist, dim=-1), len(maps[2])).to(torch.float).squeeze()
-                target = F.one_hot(torch.argmax(target_dist, dim=-1), len(maps[4])).to(torch.float).squeeze()
-
-            # get the next prediction
-            action_dist, target_dist, h_0, c_0 = decoder(h_0, c_0, action, target)
-            action_dists = torch.cat((action_dists, action_dist), dim=1)
-            target_dists = torch.cat((target_dists, target_dist), dim=1)
+        # flatten outputs for computing loss
+        actions = actions.flatten(0, 1)
+        targets = targets.flatten(0, 1)
+        action_dists = action_dists.flatten(0, 1)
+        target_dists = target_dists.flatten(0, 1)
 
         # calculate the action and target prediction loss
-        action_loss = criterion(action_dists.to(torch.float), actions.to(torch.float))
-        target_loss = criterion(target_dists.to(torch.float), targets.to(torch.float))
+        action_loss = criterion(action_dists.to(torch.float), actions.to(int))
+        target_loss = criterion(target_dists.to(torch.float), targets.to(int))
         loss = action_loss + target_loss
 
         # step optimizer and compute gradients during training
@@ -206,12 +219,137 @@ def train_epoch(
             optimizer.step()
         
         # logging
-        
+        print(f"accuracy: {epoch_acc_num / epoch_acc_denom}")
+        print(f"loss: {loss.item()}")
         epoch_loss += loss.item()
 
+
     epoch_loss /= len(loader)
+    epoch_acc = epoch_acc_num / epoch_acc_denom
 
     return epoch_loss, epoch_acc
+
+
+def lstm_inference(encoder, decoder, inputs, actions, targets, training, maps, args):
+    "Generate a sequence of action-target pairs from an LSTM."
+    # encode the instructions
+    _, h_final = encoder(inputs)
+    h_final = h_final.squeeze()
+
+    # initialize actions and targets with BOS token
+    bos_actions = bos_targets = torch.Tensor([2]).expand(h_final.shape[0]).to(int)
+
+    # decode the first action-target pair
+    action_dist, target_dist, h_0, c_0 = decoder(
+        h_0 = h_final.unsqueeze(0),
+        c_0 = None,
+        action = bos_actions,
+        target = bos_targets
+    )
+    action_dists, target_dists = action_dist, target_dist
+
+    # decode the rest autoregressively
+    for i in range(actions.shape[1] - 1):
+        # teacher forcing
+        if training and args.teacher_forcing:
+            action = actions[:,i].to(torch.float)
+            target = targets[:,i].to(torch.float)
+        else:
+            # NOTE: If you get rid of argmax, student forcing probably works better
+            action = torch.argmax(action_dist, dim=-1).to(torch.float).squeeze()
+            target = torch.argmax(target_dist, dim=-1).to(torch.float).squeeze()
+
+        # get the next prediction
+        action_dist, target_dist, h_0, c_0 = decoder(h_0, c_0, action, target)
+        action_dists = torch.cat((action_dists, action_dist), dim=1)
+        target_dists = torch.cat((target_dists, target_dist), dim=1)
+    
+    return action_dists, target_dists
+
+
+def attention_inference(encoder, decoder, inputs, actions, targets, training, maps, args):
+    "Generate a sequence of action-target pairs from an LSTM with attention."
+    # encode the instructions
+    h_seq, h_final = encoder(inputs)
+    h_final = h_final.squeeze()
+
+    # initialize actions and targets with BOS token
+    bos_actions = bos_targets = torch.Tensor([2]).expand(h_final.shape[0]).to(int)
+
+    # decode the first action-target pair
+    action_dist, target_dist, h_0, c_0 = decoder(
+        h_0 = h_final.unsqueeze(0),
+        c_0 = None,
+        action = bos_actions,
+        target = bos_targets,
+        enc = h_seq,
+    )
+    action_dists, target_dists = action_dist, target_dist
+
+    # decode the rest autoregressively
+    for i in range(actions.shape[1] - 1):
+        # teacher forcing
+        if training and args.teacher_forcing:
+            action = actions[:,i].to(torch.float)
+            target = targets[:,i].to(torch.float)
+        else:
+            # NOTE: If you get rid of one hot, student forcing probably works better
+            action = torch.argmax(action_dist, dim=-1).to(torch.float).squeeze()
+            target = torch.argmax(target_dist, dim=-1).to(torch.float).squeeze()
+
+        # get the next prediction
+        action_dist, target_dist, h_0, c_0 = decoder(
+            h_0 = h_0,
+            c_0 = c_0,
+            action = action,
+            target = target,
+            enc = h_seq,
+        )                
+        action_dists = torch.cat((action_dists, action_dist), dim=1)
+        target_dists = torch.cat((target_dists, target_dist), dim=1)
+    
+    return action_dists, target_dists
+
+
+
+def transformer_inference(encoder, decoder, inputs, actions, targets, training, maps, args):
+    # encode the instructions
+    encoded_instructions = encoder(inputs)
+
+    # initialize actions and targets with BOS and CLS token
+    bos_tokens = torch.Tensor([maps[2]['<bos>']]).expand(inputs.shape[0]).to(int)
+    cls_tokens = torch.Tensor([maps[2]['<cls>']]).expand(inputs.shape[0]).to(int)
+    generation = torch.cat((bos_tokens.unsqueeze(1), cls_tokens.unsqueeze(1)), dim=-1)
+
+    # decode the first action-target pair
+    action_dist, target_dist = decoder(generation, encoded_instructions)
+    action_dists, target_dists = action_dist.unsqueeze(1), target_dist.unsqueeze(1)
+
+    # decode the rest autoregressively
+    for i in range(actions.shape[1] - 1):
+        # TODO: add len(maps[2]) to each target value
+        # teacher forcing
+        if training and args.teacher_forcing:
+            action = actions[:,i].to(torch.float)
+            target = targets[:,i].to(torch.float)
+        else:
+            # NOTE: If you get rid of one hot, student forcing probably works better
+            action = torch.argmax(action_dist, dim=-1).to(torch.float).squeeze()
+            target = torch.argmax(target_dist, dim=-1).to(torch.float).squeeze()
+
+        generation = torch.cat((generation, action.unsqueeze(1), target.unsqueeze(1)), dim=-1)
+
+        # get the next prediction
+        action_dist, target_dist = decoder(generation, encoded_instructions)   
+        action_dist, target_dist = action_dist.unsqueeze(1), target_dist.unsqueeze(1) 
+
+        # append it to the sequence of predictions      
+        action_dists = torch.cat((action_dists, action_dist), dim=1)
+        target_dists = torch.cat((target_dists, target_dist), dim=1)
+    
+    return action_dists, target_dists
+
+
 
 
 def validate(args, encoder, decoder, loader, optimizer, criterion, maps, device):
@@ -233,6 +371,16 @@ def validate(args, encoder, decoder, loader, optimizer, criterion, maps, device)
             training=False,
         )
 
+    print()
+    print()
+    print()
+    print()
+    print('------ Validation -------')
+    print(f"val loss: {val_loss}")
+    print(f"val_acc: {val_acc}")
+    print()
+    print()
+
     return val_loss, val_acc
 
 
@@ -242,6 +390,10 @@ def train(args, encoder, decoder, loaders, optimizer, criterion, maps, device):
     # weights via backpropagation
     encoder.train()
     decoder.train()
+
+    train_losses, train_accs = [], []
+    val_losses, val_accs = [], []
+    train_epoch_nums, val_epoch_nums = [], []
 
     for epoch in tqdm.tqdm(range(args.num_epochs)):
 
@@ -260,6 +412,9 @@ def train(args, encoder, decoder, loaders, optimizer, criterion, maps, device):
 
         # some logging
         print(f"train loss : {train_loss}")
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+        train_epoch_nums.append(epoch)
 
         # run validation every so often
         # during eval, we run a forward pass through the model and compute
@@ -277,14 +432,64 @@ def train(args, encoder, decoder, loaders, optimizer, criterion, maps, device):
             )
 
             print(f"val loss : {val_loss} | val acc: {val_acc}")
+            val_losses.append(val_loss)
+            val_accs.append(val_acc)
+            val_epoch_nums.append(epoch)
 
     # ================== TODO: CODE HERE ================== #
     # Task: Implement some code to keep track of the model training and
     # evaluation loss. Use the matplotlib library to plot
     # 3 figures for 1) training loss, 2) validation loss, 3) validation accuracy
     # ===================================================== #
+    plot_performance(args, train_accs, train_losses,
+                     val_accs, val_losses,
+                     train_epoch_nums, val_epoch_nums)
 
 
+def plot_performance(args, train_accs, train_losses,
+                     val_accs, val_losses,
+                     train_epoch_nums, val_epoch_nums):
+    """
+    Given the lists of performance tracked in train(),
+    shows a matplotlib figure for containing four plots:
+        1. Accuracy on Actions 
+        2. Accuracy on Targets
+        3. Loss on Actions
+        4. Loss on Targets
+    
+    Each plot shows both the train and validation performance
+    in order to help assess overfitting on the training data. 
+    """
+
+    # Creates four subplots on the same figure, with two lines on each plot
+    # The four plots represent accuracy and loss on actions and targets
+    # The two lines represent training vs validation measures
+    # Credit to: https://matplotlib.org/stable/gallery/subplots_axes_and_figures/subplots_demo.html
+    fig, axs = plt.subplots(1, 2)
+
+    model_titles = {
+        'lstm': "LSTM",
+        'attention': "LSTM with Attention",
+        'transformer': "Encoder-Decoder Transformer"
+    }
+    title = model_titles[args.model_type]
+    title += " with Teacher Forcing" if args.teacher_forcing else " with Student Forcing"
+
+    axs[0].plot(train_epoch_nums, train_accs, "b--", label="train") 
+    axs[0].plot(val_epoch_nums, val_accs, "b-", label="validation")
+    axs[0].legend(loc="lower right")
+    axs[0].set_xlabel('Epochs')
+    axs[0].set_ylabel('Accuracy')
+    axs[0].set_title(title)
+
+    axs[1].plot(train_epoch_nums, train_losses, "o--", label="train")
+    axs[1].plot(val_epoch_nums, val_losses, "o-", label="validation")
+    axs[1].legend(loc="lower right")
+    axs[1].set_xlabel('Epochs')
+    axs[1].set_ylabel('Loss')
+    axs[1].set_title(title)
+
+    plt.show()
 
 
 def main(args):
@@ -333,12 +538,11 @@ if __name__ == "__main__":
         "--val_every", default=5, type=int, help="number of epochs between every eval loop"
     )
     parser.add_argument("--model_type", type=str, help="encoder decoder model to run")
+    parser.add_argument('--teacher_forcing', action='store_true')
+    parser.add_argument('--student_forcing', dest='teacher_forcing', action='store_false')
 
-
-    # ================== TODO: CODE HERE ================== #
-    # Task (optional): Add any additional command line
-    # parameters you may need here
-    # ===================================================== #
     args = parser.parse_args()
+
+    print(args.teacher_forcing)
 
     main(args)

@@ -97,11 +97,11 @@ def tokenize_words(args):
         # Perform one-hot encoding on actions and targets
         # Note that tokens do not require one-hot embedding because
         # torch.nn.Embedding() takes as an input a tensor of integers
-        # TODO: Do I actually need one hot?
-        data_dict['actions'] = F.one_hot(data_dict['actions'],
-                                         num_classes = len(actions_to_index))
-        data_dict['targets'] = F.one_hot(data_dict['targets'],
-                                         num_classes = len(targets_to_index))
+        # # TODO: Do I actually need one hot?
+        # data_dict['actions'] = F.one_hot(data_dict['actions'],
+        #                                  num_classes = len(actions_to_index))
+        # data_dict['targets'] = F.one_hot(data_dict['targets'],
+        #                                  num_classes = len(targets_to_index))
     
     # Print some tokenization details
     tokenizer_time = round(time.time() - begin_tokenizer, 2)
@@ -193,14 +193,16 @@ def build_output_tables(train):
             a, t = outseq
             actions.add(a)
             targets.add(t)
-    actions_to_index = {a: i + 3 for i, a in enumerate(actions)}
-    targets_to_index = {t: i + 3 for i, t in enumerate(targets)}
+    actions_to_index = {a: i + 4 for i, a in enumerate(actions)}
+    targets_to_index = {t: i + 4 for i, t in enumerate(targets)}
     actions_to_index['<pad>'] = 0
     targets_to_index['<pad>'] = 0
     actions_to_index["<end>"] = 1
     targets_to_index["<end>"] = 1
     actions_to_index["<bos>"] = 2
     targets_to_index["<bos>"] = 2
+    actions_to_index["<cls>"] = 3
+    targets_to_index["<cls>"] = 3
     index_to_actions = {actions_to_index[a]: a for a in actions_to_index}
     index_to_targets = {targets_to_index[t]: t for t in targets_to_index}
     return actions_to_index, index_to_actions, targets_to_index, index_to_targets
