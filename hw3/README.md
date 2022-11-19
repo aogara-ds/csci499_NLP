@@ -25,11 +25,16 @@ An important distinction for the performance of our models is student vs. teache
 
 
 # Results
-![LSTM Performance](images/lstm_teacher.png)
+![Performance Chart](images/lstm_teacher.png)
 The vanilla LSTM with teacher-forcing is truly the most overfit model I've ever seen. The validation loss is nearly doubles during training, becoming far worse than the uninitialized model. I really doubted that it was possible, but I triple checked, and then laughed a lot. Gotta love ML. 
 
+![Performance Chart](images/lstm_student.png)
 Student-forcing on the vanilla LSTM brought validation performance on par with training performance. The accuracy still wasn't great, around 44% after 10 epochs. 
 
+![Performance Chart](images/attention_teacher.png)
+![Performance Chart](images/attention_student.png)
 Attention slowed down the LSTM, both in inference and in the slope of the loss curve. But the model eventually outperformed the vanilla LSTM, achieving 50% - 55% accuracy. Student-forcing had a much smaller effect than in the vanilla LSTM. 
 
+![Performance Chart](images/transformer_teacher.png)
+![Performance Chart](images/transformer_student.png)
 The Transformers performed the best, which was a nice payoff for the effort. The teacher-forced model achieved strong training accuracy (74%) at the expense of lower validation accuracy (58%). The student-forced Transformer was the best performing model, achieving 64% training accuracy and 62% validation accuracy. 
