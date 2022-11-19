@@ -25,7 +25,7 @@ An important distinction for the performance of our models is student vs. teache
 
 
 # Results
-![LSTM Performance](images/lstm_teacher)
+![LSTM Performance](images/lstm_teacher.png)
 The vanilla LSTM with teacher-forcing is truly the most overfit model I've ever seen. The validation loss is nearly doubles during training, becoming far worse than the uninitialized model. I really doubted that it was possible, but I triple checked, and then laughed a lot. Gotta love ML. 
 
 Student-forcing on the vanilla LSTM brought validation performance on par with training performance. The accuracy still wasn't great, around 44% after 10 epochs. 
